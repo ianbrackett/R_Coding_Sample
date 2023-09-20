@@ -1,0 +1,109 @@
+---
+title: "Spatial buffer construction and shapefile joining - Coding sample"
+output: html_document
+date: "3/13/2023"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+-Ian Brackett
+
+```{r, results='hide', warning=FALSE, message=FALSE}
+library(dplyr, warn.conflicts = FALSE)
+library(tidygeocoder)
+library(tidycensus)
+library(tidyverse)
+library(sf)
+library(tigris)
+library(ggplot2)
+library(foreign)
+library(leaflet)
+library(leafsync)
+```
+
+-   Firstly read in the needed data and convert to st formats:
+
+```{r}
+SitesWithCases <- read.csv("C:/Users/ianjb/Documents/PUBAFRS_Capstone_2022/LitigationLocationDataNAsRemoved.csv")
+SitesWithCases_st <- SitesWithCases %>%
+  st_as_sf(coords = c('Longitude', 'Latitude'),
+           crs = 4326) %>%
+  st_transform(26975)
+ACSdata2020_PopulationDensity_HomeValue <- read.csv("C:/Users/ianjb/Documents/PUBAFRS_Capstone_2022/ACS2020PopulationDensity_HouseValues.csv", colClasses = c("Geo_FIPS"= "character"))
+
+```
+
+-   Create the 1km buffer around coordinate points.
+
+```{r}
+Lawsuit_Site_1km_Buffer <- st_buffer(SitesWithCases_st, dist = 1000)
+```
+
+-   Download a shapefile of USA block groups and convert to the same format.
+
+```{r, results='hide'}
+BlockGroups2020 <- block_groups(state = NULL, cb = TRUE, county = NULL, year = 2020) %>%
+  st_transform(26975)
+```
+
+-   Join the buffers and block groups.
+
+```{r}
+buffer_blockgroups <- st_join(Lawsuit_Site_1km_Buffer, BlockGroups2020)
+```
+
+-   This dataset now contains the Geo IDs of all block groups that fall at least partially within 1km of lawsuit sites across the country, which can then be paired with American Community Survey (ACS) data.
+
+-   Lets look at the population density of those block groups.
+
+```{r}
+Lawsuit_SubsetACS <- ACSdata2020_PopulationDensity_HomeValue %>%
+  dplyr::filter(ACSdata2020_PopulationDensity_HomeValue$Geo_FIPS %in% buffer_blockgroups$GEOID) #getting ACS data for the joined block groups
+head(Lawsuit_SubsetACS$SE_A00002_002)
+```
+
+-   Now lets map the buffers onto the block groups with a small sub-sample.
+```{r, results='hide'}
+test_data <- SitesWithCases_st[1, ] #Data subset
+testBuffer1km <- st_buffer(test_data, dist = 1000)#Create buffers around the test data
+NassauBlockgroup <- block_groups(state = "NY", county = "nassau", ) #Gathers the 2020 shapefiles of block groups in Nassau county, NY.
+```
+
+
+```{r}
+map1 <- leaflet() %>% 
+  addTiles() %>%
+  addPolygons(data = st_transform(testBuffer1km, 4326)) %>% #This reads in the buffer 
+  addPolygons(data = st_transform(NassauBlockgroup, 4326)) #This reads in the block groups
+map1
+
+```
+
+-   Now lets look at counts of different plaintiff types from the lawsuits.
+
+```{r}
+targeta <- c("fed", "industry", "local", 
+             "local%state", "state",  "state%local") #Target of which plaintiff types I want to draw
+
+dfa <- SitesWithCases%>%
+  dplyr::filter(SitesWithCases$Plaintiff.Types %in% targeta) #draws target plaintiffs
+statelocal <- c("local", "local%state", "state", "state%local")
+dfb <- dfa %>%
+  mutate(Plaintiff.Types = str_replace_all(Plaintiff.Types, paste(statelocal, collapse = "|", "$", sep = ""), "StateLocal")) #renames plaintiff types
+
+table(dfb$Plaintiff.Types) #Count number of cases of new plaintiff types
+```
+
+-   Lets map the plaintiff types across the USA.
+
+```{r}
+ggplot(NULL, aes(Longitude, Latitude), color = "grey99")+
+  borders("state")+
+  geom_point(data = dfb, aes(color = Plaintiff.Types, shape = Plaintiff.Types), alpha = 0.5)+
+  scale_colour_discrete(name="Plaintiff Type", labels=c("Federal","Industry","State and Local"))+
+  scale_shape_discrete(name="Plaintiff Type", labels=c("Federal","Industry","State and Local"))+
+  theme(legend.position = "bottom")+
+  coord_cartesian(xlim = c(-125,-67), ylim = c(26, 50))
+```
